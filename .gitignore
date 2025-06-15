@@ -1,0 +1,27 @@
+# Virtual environment
+venv/
+.env
+*.env
+
+# Compiled Python files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Log files
+*.log
+
+# Jupyter or notebook checkpoints (if ever used)
+.ipynb_checkpoints/
+
+# pip/IDE cache and metadata
+pip-wheel-metadata/
+*.egg-info/
+.cache/
+*.db
+
+# IDE/project files
+.vscode/
+.idea/
+
+# macOS system
