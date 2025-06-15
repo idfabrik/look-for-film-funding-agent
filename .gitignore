@@ -3,6 +3,9 @@ venv/
 .env
 *.env
 
+# google API jsonfile
+credentials.json 
+
 # Compiled Python files
 __pycache__/
 *.py[cod]
