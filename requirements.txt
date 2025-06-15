@@ -1,0 +1,30 @@
+# CrewAI & tools
+crewai
+crewai-tools
+
+# LLMs & LangChain
+openai
+langchain
+langchain-openai
+
+# Web scraping & APIs
+requests
+beautifulsoup4
+lxml
+html2text
+
+# Google Sheets
+gspread
+google-auth
+google-auth-oauthlib
+google-api-python-client
+
+# Utilities
+python-dotenv
+sqlite-utils
+tqdm
+rich
+
+# Embedding / optional vector storage
+embedchain
+
