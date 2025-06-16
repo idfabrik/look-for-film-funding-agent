@@ -9,128 +9,135 @@ import gspread
 from google.oauth2.service_account import Credentials
 import re
 
-# --- 🔧 Forcer l'utilisation d'IPv4 uniquement ---
+# --- Force IPv4 only ---
 def allowed_gai_family():
     return socket.AF_INET
 urllib3_cn.allowed_gai_family = allowed_gai_family
 
-# --- Charger les variables d'environnement ---
+# --- Load environment variables ---
 load_dotenv()
 
-# --- Configuration Google Sheets ---
+# --- Google Sheets configuration ---
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 CREDENTIALS_FILE = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
 SPREADSHEET_ID = '1tPTgSOLZxXQkBs0e5r_RuAmE6GODI1qgq_g7RFTELSE'
 
-# --- Configuration de recherche ---
+# --- Search configuration (reduced) ---
 SEARCH_QUERIES = [
-    # Recherches prioritaires France
-    "financement film documentaire 2025 2026 France CNC aide cinema",
-    "subvention documentaire fiction serie France 2025 2026",
-    "coproduction internationale France Afrique cinema 2025 2026",
-    "aide production audiovisuelle France documentaire fiction 2025",
+    # Priority searches France
+    # "financement film documentaire 2025 2026 France CNC aide cinema",
+    # "subvention documentaire fiction serie France 2025 2026",
+    # "coproduction internationale France Afrique cinema 2025 2026",
+    "aide production audiovisuelle 2025 2026",
     
-    # Recherches prioritaires Allemagne
-    "film funding Germany documentary fiction 2025 2026 Filmförderung",
-    "German film funding international coproduction Africa 2025 2026",
-    "Filmförderungsanstalt FFA documentary funding 2025 2026",
-    "German French coproduction film funding 2025 2026",
+    # Priority searches Germany
+    #"film funding Germany documentary fiction 2025 2026 Filmförderung",
+    #"German film funding international coproduction Africa 2025 2026",
+    #"Filmförderungsanstalt FFA documentary funding 2025 2026",
+    #"German French coproduction film funding 2025 2026",
     
-    # Recherches spécifiques Bénin/Afrique
-    "film funding Africa Benin documentary fiction 2025 2026",
-    "African cinema funding international coproduction 2025 2026",
-    "francophone film funding Africa documentary 2025 2026",
+    # Specific searches Benin/Africa
+    #"film funding Africa Benin documentary fiction 2025 2026",
+    #"African cinema funding international coproduction 2025 2026",
+    #"francophone film funding Africa documentary 2025 2026",
     
-    # Recherches thématiques
-    "documentary funding political subjects Africa 2025 2026",
-    "cultural documentary funding voodoo traditional beliefs 2025",
-    "international coproduction funding documentary series 2025 2026",
+    # Thematic searches
+    #"documentary funding political subjects Africa 2025 2026",
+    #"cultural documentary funding voodoo traditional beliefs 2025",
+    #"international coproduction funding documentary series 2025 2026",
     
-    # Recherches européennes
-    "European film funding documentary fiction 2025 2026 Creative Europe",
-    "EU funding cinema coproduction Africa 2025 2026",
+    # European searches
+    #"European film funding documentary fiction 2025 2026 Creative Europe",
+    #"EU funding cinema coproduction Africa 2025 2026",
     
-    # Recherches générales
-    "film funding opportunities 2025 2026 documentary fiction",
-    "international film funding documentary series 2025 2026"
+    # General searches
+    #"film funding opportunities 2025 2026 documentary fiction",
+    #"international film funding documentary series 2025 2026"
 ]
 
-# --- Fonctions Google Sheets ---
+# --- Google Sheets functions ---
 def get_google_sheet():
-    """Initialise et retourne la feuille Google Sheets"""
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
-    client = gspread.authorize(creds)
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
-    
-    # Essayer d'ouvrir la feuille principale, sinon créer une nouvelle
+    """Initialize and return Google Sheets worksheet"""
     try:
-        sheet = spreadsheet.worksheet("Film Funding")
-    except gspread.WorksheetNotFound:
-        sheet = spreadsheet.add_worksheet(title="Film Funding", rows="1000", cols="10")
-    
-    return sheet
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
+        
+        # Try to open main sheet, otherwise create new one
+        try:
+            sheet = spreadsheet.worksheet("Film Funding")
+        except gspread.WorksheetNotFound:
+            sheet = spreadsheet.add_worksheet(title="Film Funding", rows="1000", cols="13")
+        
+        return sheet
+    except Exception as e:
+        print(f"❌ Error initializing Google Sheets: {e}")
+        return None
 
 def setup_sheet_headers(sheet):
-    """Configure les en-têtes de colonnes si elles n'existent pas"""
+    """Configure column headers if they don't exist"""
     headers = [
-        "Nom", "Organisme", "Pays", "Deadline", "Lien", 
-        "Résumé", "Email", "Conditions", "Catégorie", "Année", 
-        "Date Ajout", "Statut", "Priorité"
+        "Name", "Organization", "Country", "Deadline", "Link", 
+        "Summary", "Email", "Conditions", "Category", "Year", 
+        "Date Added", "Status", "Priority"
     ]
     
-    # Vérifier si la première ligne contient déjà des en-têtes
     try:
+        # Check if first row already contains headers
         existing_headers = sheet.row_values(1)
         if not existing_headers or len(existing_headers) == 0:
             sheet.append_row(headers)
-            print("✅ En-têtes ajoutés à la feuille")
+            print("✅ Headers added to sheet")
         else:
-            # Ajouter les colonnes manquantes
+            # Add missing columns
             for i, header in enumerate(headers):
                 if i >= len(existing_headers) or existing_headers[i] != header:
                     if i < len(existing_headers):
                         sheet.update_cell(1, i+1, header)
                     else:
-                        # Étendre la ligne d'en-têtes
+                        # Extend header row
                         current_headers = sheet.row_values(1)
                         current_headers.extend(headers[len(current_headers):])
                         sheet.update('1:1', [current_headers])
                         break
     except Exception as e:
-        print(f"⚠️ Erreur lors de la configuration des en-têtes : {e}")
-        sheet.append_row(headers)
+        print(f"⚠️ Error setting up headers: {e}")
+        try:
+            sheet.append_row(headers)
+        except Exception as e2:
+            print(f"❌ Failed to add headers: {e2}")
 
-def categorize_funding(nom, resume, organisme):
-    """Détermine la catégorie de financement"""
-    text_to_analyze = f"{nom} {resume} {organisme}".lower()
+def categorize_funding(name, summary, organization):
+    """Determine funding category"""
+    text_to_analyze = f"{name} {summary} {organization}".lower()
     
-    if any(word in text_to_analyze for word in ['série', 'series', 'tv', 'télévision', 'television']):
-        return "Série"
-    elif any(word in text_to_analyze for word in ['fiction', 'long-métrage', 'feature']):
+    if any(word in text_to_analyze for word in ['series', 'tv', 'television']):
+        return "Series"
+    elif any(word in text_to_analyze for word in ['fiction', 'feature', 'long-métrage']):
         return "Fiction"
-    elif any(word in text_to_analyze for word in ['documentaire', 'documentary', 'doc']):
-        return "Documentaire"
+    elif any(word in text_to_analyze for word in ['documentary', 'documentaire', 'doc']):
+        return "Documentary"
     else:
-        return "Général"
+        return "General"
 
-def determine_priority(pays, organisme):
-    """Détermine la priorité basée sur le pays"""
-    text_to_check = f"{pays} {organisme}".lower()
+def determine_priority(country, organization):
+    """Determine priority based on country"""
+    text_to_check = f"{country} {organization}".lower()
     
     if any(word in text_to_check for word in ['france', 'français', 'cnc', 'french']):
-        return "Haute - France"
+        return "High - France"
     elif any(word in text_to_check for word in ['germany', 'german', 'allemagne', 'deutschland', 'ffa']):
-        return "Haute - Allemagne"
-    elif any(word in text_to_check for word in ['bénin', 'benin', 'afrique', 'africa']):
-        return "Moyenne - Afrique"
+        return "High - Germany"
+    elif any(word in text_to_check for word in ['benin', 'bénin', 'africa', 'afrique']):
+        return "Medium - Africa"
     elif any(word in text_to_check for word in ['europe', 'eu', 'creative']):
-        return "Moyenne - Europe"
+        return "Medium - Europe"
     else:
-        return "Normale"
+        return "Normal"
 
-def extract_year(deadline, resume):
-    """Extrait l'année de l'aide"""
-    text_to_check = f"{deadline} {resume}"
+def extract_year(deadline, summary):
+    """Extract year from deadline or summary"""
+    text_to_check = f"{deadline} {summary}"
     
     if '2025' in text_to_check:
         return "2025"
@@ -139,25 +146,31 @@ def extract_year(deadline, resume):
     elif any(word in text_to_check.lower() for word in ['2025', '2026']):
         return "2025-2026"
     else:
-        return "Non spécifié"
-    """Récupère les entrées existantes pour éviter les doublons"""
+        return "Not specified"
+
+def get_existing_entries(sheet):
+    """Get existing entries to avoid duplicates"""
     try:
         records = sheet.get_all_records()
         existing = set()
         for record in records:
-            nom = record.get('Nom', '').strip()
-            lien = record.get('Lien', '').strip()
-            if nom and lien:
-                existing.add((nom.lower(), lien))
+            name = record.get('Name', '').strip()
+            link = record.get('Link', '').strip()
+            if name and link:
+                existing.add((name.lower(), link))
         return existing
     except Exception as e:
-        print(f"⚠️ Erreur lors de la récupération des entrées : {e}")
+        print(f"⚠️ Error retrieving existing entries: {e}")
         return set()
 
 def send_to_google_sheets(funding_data):
-    """Envoie les données vers Google Sheets"""
+    """Send data to Google Sheets"""
     try:
         sheet = get_google_sheet()
+        if not sheet:
+            print("❌ Failed to get Google Sheet")
+            return False
+            
         setup_sheet_headers(sheet)
         existing_entries = get_existing_entries(sheet)
         
@@ -165,53 +178,53 @@ def send_to_google_sheets(funding_data):
         duplicate_count = 0
         
         for entry in funding_data:
-            nom = entry.get('nom', '').strip()
-            lien = entry.get('lien', '').strip()
+            name = entry.get('name', '').strip()
+            link = entry.get('link', '').strip()
             
-            # Vérifier les doublons
-            if (nom.lower(), lien) in existing_entries:
+            # Check for duplicates
+            if (name.lower(), link) in existing_entries:
                 duplicate_count += 1
-                print(f"⏭️ Doublon ignoré : {nom}")
+                print(f"⏭️ Duplicate ignored: {name}")
                 continue
             
-            # Déterminer la catégorie, année et priorité
-            categorie = categorize_funding(entry.get('nom', ''), entry.get('résumé', ''), entry.get('organisme', ''))
-            annee = extract_year(entry.get('deadline', ''), entry.get('résumé', ''))
-            priorite = determine_priority(entry.get('pays', ''), entry.get('organisme', ''))
+            # Determine category, year and priority
+            category = categorize_funding(entry.get('name', ''), entry.get('summary', ''), entry.get('organization', ''))
+            year = extract_year(entry.get('deadline', ''), entry.get('summary', ''))
+            priority = determine_priority(entry.get('country', ''), entry.get('organization', ''))
             
-            # Préparer la ligne de données
+            # Prepare data row
             from datetime import datetime
             row_data = [
-                entry.get('nom', ''),
-                entry.get('organisme', ''),
-                entry.get('pays', ''),
+                entry.get('name', ''),
+                entry.get('organization', ''),
+                entry.get('country', ''),
                 entry.get('deadline', ''),
-                entry.get('lien', ''),
-                entry.get('résumé', ''),
+                entry.get('link', ''),
+                entry.get('summary', ''),
                 entry.get('email', ''),
                 entry.get('conditions', ''),
-                categorie,
-                annee,
+                category,
+                year,
                 datetime.now().strftime('%Y-%m-%d %H:%M'),
-                'Nouveau',
-                priorite
+                'New',
+                priority
             ]
             
             try:
                 sheet.append_row(row_data)
                 added_count += 1
-                print(f"✅ Ajouté : {nom}")
+                print(f"✅ Added: {name}")
             except Exception as e:
-                print(f"❌ Erreur lors de l'ajout de {nom} : {e}")
+                print(f"❌ Error adding {name}: {e}")
         
-        print(f"\n📊 Résumé Google Sheets :")
-        print(f"   - {added_count} nouvelles entrées ajoutées")
-        print(f"   - {duplicate_count} doublons ignorés")
+        print(f"\n📊 Google Sheets Summary:")
+        print(f"   - {added_count} new entries added")
+        print(f"   - {duplicate_count} duplicates ignored")
         
         return True
         
     except Exception as e:
-        print(f"❌ Erreur Google Sheets : {e}")
+        print(f"❌ Google Sheets Error: {e}")
         return False
 
 # --- Google Search API Wrapper ---
@@ -226,8 +239,8 @@ def google_search(query):
         "cx": cse_id,
         "q": query
     }
-    print("🔐 API Key:", api_key)
-    print("🔍 CSE ID:", cse_id)
+    print("🔐 API Key:", api_key[:10] + "...")  # Only show first 10 chars for security
+    print("🔍 CSE ID:", cse_id[:10] + "...")   # Only show first 10 chars for security
     print("📡 Query:", query)
     response = requests.get(url, params=params)
     response.raise_for_status()
@@ -249,48 +262,48 @@ def extract_page_content(url):
     data = response.json()
     return data.get("content") or data.get("summary") or "No summary available."
 
-# --- Fonction de parsing des résultats ---
+# --- Function to parse results ---
 def parse_funding_results(result_text):
-    """Parse le texte des résultats pour extraire les données structurées"""
+    """Parse result text to extract structured data"""
     funding_entries = []
     
-    # Essayer différents patterns de regex pour capturer les données
+    # Try different regex patterns to capture data
     patterns = [
-        # Pattern principal avec tous les champs
-        r"Nom\s*:\s*(.*?)\s*Organisme\s*:\s*(.*?)\s*Pays\s*:\s*(.*?)\s*Deadline\s*:\s*(.*?)\s*Lien\s*:\s*(.*?)\s*Résumé\s*:\s*(.*?)\s*Email\s*:\s*(.*?)\s*Conditions\s*:\s*(.*?)(?=Nom\s*:|$)",
-        # Pattern alternatif sans certains champs
-        r"Nom\s*:\s*(.*?)\s*Organisme\s*:\s*(.*?)\s*Pays\s*:\s*(.*?)\s*Lien\s*:\s*(.*?)\s*Résumé\s*:\s*(.*?)(?=Nom\s*:|$)",
+        # Main pattern with all fields
+        r"Name\s*:\s*(.*?)\s*Organization\s*:\s*(.*?)\s*Country\s*:\s*(.*?)\s*Deadline\s*:\s*(.*?)\s*Link\s*:\s*(.*?)\s*Summary\s*:\s*(.*?)\s*Email\s*:\s*(.*?)\s*Conditions\s*:\s*(.*?)(?=Name\s*:|$)",
+        # Alternative pattern without some fields
+        r"Name\s*:\s*(.*?)\s*Organization\s*:\s*(.*?)\s*Country\s*:\s*(.*?)\s*Link\s*:\s*(.*?)\s*Summary\s*:\s*(.*?)(?=Name\s*:|$)",
     ]
     
     for pattern in patterns:
         matches = re.findall(pattern, result_text, re.DOTALL | re.IGNORECASE)
         
         for match in matches:
-            if len(match) >= 5:  # Au minimum nom, organisme, pays, lien, résumé
+            if len(match) >= 5:  # Minimum: name, organization, country, link, summary
                 entry = {
-                    "nom": match[0].strip(),
-                    "organisme": match[1].strip(),
-                    "pays": match[2].strip(),
+                    "name": match[0].strip(),
+                    "organization": match[1].strip(),
+                    "country": match[2].strip(),
                     "deadline": match[3].strip() if len(match) > 3 else "",
-                    "lien": match[4].strip() if len(match) > 4 else match[3].strip(),
-                    "résumé": match[5].strip() if len(match) > 5 else match[4].strip(),
+                    "link": match[4].strip() if len(match) > 4 else match[3].strip(),
+                    "summary": match[5].strip() if len(match) > 5 else match[4].strip(),
                     "email": match[6].strip() if len(match) > 6 else "",
                     "conditions": match[7].strip() if len(match) > 7 else ""
                 }
                 
-                # Nettoyer les données
+                # Clean data
                 for key, value in entry.items():
-                    entry[key] = re.sub(r'\*\*', '', value)  # Enlever les **
-                    entry[key] = re.sub(r'[\(\)]+', '', entry[key])  # Enlever parenthèses superflues
+                    entry[key] = re.sub(r'\*\*', '', value)  # Remove **
+                    entry[key] = re.sub(r'[\(\)]+', '', entry[key])  # Remove excessive parentheses
                     entry[key] = entry[key].strip()
                 
-                if entry["nom"] and entry["organisme"]:  # Vérifier que les champs essentiels existent
+                if entry["name"] and entry["organization"]:  # Check essential fields exist
                     funding_entries.append(entry)
         
-        if funding_entries:  # Si on a trouvé des entrées, on s'arrête
+        if funding_entries:  # If we found entries, stop
             break
     
-    # Si aucun pattern ne fonctionne, essayer une approche plus simple
+    # If no pattern works, try simpler approach
     if not funding_entries:
         lines = result_text.split('\n')
         current_entry = {}
@@ -302,125 +315,125 @@ def parse_funding_results(result_text):
                 key = key.strip().lower()
                 value = value.strip()
                 
-                if 'nom' in key:
-                    if current_entry and current_entry.get('nom'):
+                if 'name' in key:
+                    if current_entry and current_entry.get('name'):
                         funding_entries.append(current_entry)
-                    current_entry = {'nom': value}
-                elif 'organisme' in key:
-                    current_entry['organisme'] = value
-                elif 'pays' in key:
-                    current_entry['pays'] = value
+                    current_entry = {'name': value}
+                elif 'organization' in key:
+                    current_entry['organization'] = value
+                elif 'country' in key:
+                    current_entry['country'] = value
                 elif 'deadline' in key:
                     current_entry['deadline'] = value
-                elif 'lien' in key:
-                    current_entry['lien'] = value
-                elif 'résumé' in key or 'resume' in key:
-                    current_entry['résumé'] = value
+                elif 'link' in key:
+                    current_entry['link'] = value
+                elif 'summary' in key:
+                    current_entry['summary'] = value
                 elif 'email' in key:
                     current_entry['email'] = value
                 elif 'condition' in key:
                     current_entry['conditions'] = value
         
-        if current_entry and current_entry.get('nom'):
+        if current_entry and current_entry.get('name'):
             funding_entries.append(current_entry)
     
     return funding_entries
 
 # --- Agents ---
 search_agent = Agent(
-    role="Spécialiste du financement audiovisuel France-Allemagne-Afrique",
-    goal="Identifier les aides au financement pour documentaires, fictions et séries, priorité France-Allemagne, pour projet tourné au Bénin sur vaudou et politique.",
+    role="Film funding specialist France-Germany-Africa",
+    goal="Identify funding opportunities for documentaries, fiction and series, priority France-Germany, for project filmed in Benin about voodoo and politics.",
     backstory=(
-        "Expert en coproductions internationales France-Allemagne-Afrique, spécialisé dans les projets "
-        "documentaires et fictions abordant des sujets culturels et politiques africains."
+        "Expert in international co-productions France-Germany-Africa, specialized in documentary "
+        "and fiction projects addressing African cultural and political subjects."
     ),
     verbose=True,
 )
 
 data_cleaning_agent = Agent(
-    role="Nettoyeur de données",
-    goal="Nettoyer, uniformiser et reformuler les informations collectées pour créer une base exploitable dans un tableur, sans mise en forme superflue ni éléments markdown.",
-    backstory="Spécialiste de la normalisation de données pour des bases structurées.",
+    role="Data cleaner",
+    goal="Clean, standardize and reformulate collected information to create a usable database in a spreadsheet, without superfluous formatting or markdown elements.",
+    backstory="Specialist in data normalization for structured databases.",
     verbose=True,
 )
 
-# --- Fonction de recherche améliorée ---
+# --- Enhanced research function ---
 def funding_research_task():
-    print("🔍 Performing multiple Google searches...")
+    print("🔍 Performing Google searches...")
     all_opportunities = []
     
     for i, query in enumerate(SEARCH_QUERIES, 1):
-        print(f"\n🎯 Recherche {i}/{len(SEARCH_QUERIES)}: {query}")
+        print(f"\n🎯 Search {i}/{len(SEARCH_QUERIES)}: {query}")
         try:
             urls = google_search(query)
             print(f"🔗 Found {len(urls)} URLs")
             
-            # Traiter plus d'URLs par requête (10 au lieu de 5)
-            for j, url in enumerate(urls[:10]):
-                print(f"📄 Reading {j+1}/10: {url}")
+            # Process fewer URLs per query to reduce time (5 instead of 10)
+            for j, url in enumerate(urls[:5]):
+                print(f"📄 Reading {j+1}/5: {url}")
                 try:
                     summary = extract_page_content(url)
                     all_opportunities.append(f"---\nQuery: {query}\nURL: {url}\n{summary}")
                 except Exception as e:
-                    print(f"⚠️ Erreur extraction {url}: {e}")
+                    print(f"⚠️ Extraction error {url}: {e}")
                     continue
         except Exception as e:
-            print(f"❌ Erreur recherche '{query}': {e}")
+            print(f"❌ Search error '{query}': {e}")
             continue
     
-    print(f"\n✅ Total: {len(all_opportunities)} contenus extraits")
+    print(f"\n✅ Total: {len(all_opportunities)} contents extracted")
     return "\n\n".join(all_opportunities)
 
 # --- Tasks ---
 search_task = Task(
-    description=f"""Analyse le contenu web collecté et extrait les opportunités de financement pour:
+    description=f"""Analyze collected web content and extract funding opportunities for:
 
-PROJET CIBLE:
-- Documentaire/Fiction/Série sur le vaudou et la politique au Bénin
-- Coproduction France-Allemagne-Bénin
-- Années 2025-2026
+TARGET PROJECT:
+- Documentary/Fiction/Series about voodoo and politics in Benin
+- France-Germany-Benin co-production
+- Years 2025-2026
 
-PRIORITÉS DE RECHERCHE:
-1. Aides françaises (CNC, régionales, etc.)
-2. Aides allemandes (FFA, Länder, etc.) 
-3. Aides européennes (Creative Europe, etc.)
-4. Aides internationales Afrique-Europe
+SEARCH PRIORITIES:
+1. French funding (CNC, regional, etc.)
+2. German funding (FFA, Länder, etc.) 
+3. European funding (Creative Europe, etc.)
+4. International Africa-Europe funding
 
-Pour chaque aide, fournis ces champs EXACTS:
-- Nom: Nom officiel de l'aide
-- Organisme: Organisation qui propose le financement
-- Pays: Pays ou région de l'organisme
-- Deadline: Date limite de candidature (2025/2026)
-- Lien: URL directe vers la page de l'aide
-- Résumé: Description courte (2-3 phrases)
-- Email: Email de contact si disponible
-- Conditions: Critères d'éligibilité clés
+For each funding opportunity, provide these EXACT fields:
+- Name: Official name of the funding
+- Organization: Organization offering the funding
+- Country: Country or region of the organization
+- Deadline: Application deadline (2025/2026)
+- Link: Direct URL to the funding page
+- Summary: Short description (2-3 sentences)
+- Email: Contact email if available
+- Conditions: Key eligibility criteria
 
-Contenu à analyser:
+Content to analyze:
 {funding_research_task()}""",
-    expected_output="Liste structurée d'aides avec champs: Nom, Organisme, Pays, Deadline, Lien, Résumé, Email, Conditions. Priorité aux aides France-Allemagne 2025-2026.",
+    expected_output="Structured list of funding opportunities with fields: Name, Organization, Country, Deadline, Link, Summary, Email, Conditions. Priority to France-Germany funding 2025-2026.",
     agent=search_agent,
 )
 
-# Tâche de nettoyage
+# Cleaning task
 data_cleaning_task = Task(
-    description="""Nettoie et structure les données pour un projet documentaire/fiction au Bénin:
+    description="""Clean and structure data for documentary/fiction project in Benin:
 
-NETTOYAGE:
-- Supprime caractères inutiles (**...**, parenthèses superflues)
-- Corrige formats email et liens
-- Reformule résumés trop longs (max 2-3 phrases)
-- Identifie si l'aide concerne: Documentaire/Fiction/Série
+CLEANING:
+- Remove unnecessary characters (**...**, superfluous parentheses)
+- Fix email and link formats
+- Reformulate summaries that are too long (max 2-3 sentences)
+- Identify if funding concerns: Documentary/Fiction/Series
 
-PRIORISATION:
-- Marque les aides France et Allemagne comme prioritaires
-- Identifie les aides 2025 et 2026
-- Signale les aides spécifiques coproduction internationale
+PRIORITIZATION:
+- Mark France and Germany funding as priority
+- Identify 2025 and 2026 funding
+- Flag international co-production specific funding
 
-STRUCTURE FINALE:
-Champs obligatoires: Nom, Organisme, Pays, Deadline, Lien, Résumé, Email, Conditions
-Résultat prêt pour tableur avec classification automatique.""",
-    expected_output="Version propre et classifiée (Documentaire/Fiction/Série) avec priorités France-Allemagne identifiées",
+FINAL STRUCTURE:
+Required fields: Name, Organization, Country, Deadline, Link, Summary, Email, Conditions
+Result ready for spreadsheet with automatic classification.""",
+    expected_output="Clean and classified version (Documentary/Fiction/Series) with France-Germany priorities identified",
     agent=data_cleaning_agent
 )
 
@@ -436,7 +449,7 @@ print("🚀 Starting funding research and cleaning tasks...")
 try:
     result = crew.kickoff()
     
-    # Extraire le résultat final
+    # Extract final result
     if hasattr(result, 'raw') and isinstance(result.raw, str):
         final_content = result.raw
     else:
@@ -446,14 +459,14 @@ except Exception as e:
     print("❌ Error during crew execution:", str(e))
     final_content = "No results due to error."
 
-# --- Parser et envoyer vers Google Sheets ---
+# --- Parse and send to Google Sheets ---
 print("📊 Parsing results for Google Sheets...")
 funding_data = parse_funding_results(final_content)
 
 if funding_data:
     print(f"📋 Found {len(funding_data)} funding opportunities")
     
-    # Envoyer vers Google Sheets
+    # Send to Google Sheets
     sheets_success = send_to_google_sheets(funding_data)
     
     if sheets_success:
@@ -483,17 +496,17 @@ else:
 
 print("\n✅ Script completed!")
 
-# Optionnel : afficher le résultat dans la console
+# Optional: display result in console
 print("\n" + "="*50)
-print("RÉSULTATS NETTOYÉS :")
+print("CLEANED RESULTS:")
 print("="*50)
 print(final_content)
 
 if funding_data:
     print("\n" + "="*50)
-    print("DONNÉES STRUCTURÉES POUR GOOGLE SHEETS :")
+    print("STRUCTURED DATA FOR GOOGLE SHEETS:")
     print("="*50)
     for i, entry in enumerate(funding_data, 1):
-        print(f"\n--- ENTRÉE {i} ---")
+        print(f"\n--- ENTRY {i} ---")
         for key, value in entry.items():
             print(f"{key.capitalize()}: {value}")
