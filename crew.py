@@ -1,512 +1,311 @@
+from crewai import Agent, Task, Crew
+from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
 import os
 import requests
-import socket
-import requests.packages.urllib3.util.connection as urllib3_cn
-from crewai import Agent, Task, Crew
-from dotenv import load_dotenv
-from tools.smtp_email_tool import smtp_email_sender
-import gspread
-from google.oauth2.service_account import Credentials
-import re
+from sheets_utils import send_to_google_sheet, get_existing_entries, get_keywords_from_sheet, generate_crew_prompt, parse_crew_output
 
-# --- Force IPv4 only ---
-def allowed_gai_family():
-    return socket.AF_INET
-urllib3_cn.allowed_gai_family = allowed_gai_family
-
-# --- Load environment variables ---
+# Charger les variables d'environnement (.env)
 load_dotenv()
 
-# --- Google Sheets configuration ---
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-CREDENTIALS_FILE = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
-SPREADSHEET_ID = '1tPTgSOLZxXQkBs0e5r_RuAmE6GODI1qgq_g7RFTELSE'
+# Initialiser le modèle LLM
+llm = ChatOpenAI(model="gpt-4-turbo")
 
-# --- Search configuration (reduced) ---
-SEARCH_QUERIES = [
-    # Priority searches France
-    # "financement film documentaire 2025 2026 France CNC aide cinema",
-    # "subvention documentaire fiction serie France 2025 2026",
-    # "coproduction internationale France Afrique cinema 2025 2026",
-    "aide production audiovisuelle 2025 2026",
-    
-    # Priority searches Germany
-    #"film funding Germany documentary fiction 2025 2026 Filmförderung",
-    #"German film funding international coproduction Africa 2025 2026",
-    #"Filmförderungsanstalt FFA documentary funding 2025 2026",
-    #"German French coproduction film funding 2025 2026",
-    
-    # Specific searches Benin/Africa
-    #"film funding Africa Benin documentary fiction 2025 2026",
-    #"African cinema funding international coproduction 2025 2026",
-    #"francophone film funding Africa documentary 2025 2026",
-    
-    # Thematic searches
-    #"documentary funding political subjects Africa 2025 2026",
-    #"cultural documentary funding voodoo traditional beliefs 2025",
-    #"international coproduction funding documentary series 2025 2026",
-    
-    # European searches
-    #"European film funding documentary fiction 2025 2026 Creative Europe",
-    #"EU funding cinema coproduction Africa 2025 2026",
-    
-    # General searches
-    #"film funding opportunities 2025 2026 documentary fiction",
-    #"international film funding documentary series 2025 2026"
-]
+# Générer dynamiquement le prompt basé sur les colonnes du Google Sheet
+prompt_text, expected_headers = generate_crew_prompt()
+print(f"\n📋 Colonnes à rechercher : {expected_headers}\n")
 
-# --- Google Sheets functions ---
-def get_google_sheet():
-    """Initialize and return Google Sheets worksheet"""
-    try:
-        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
-        client = gspread.authorize(creds)
-        spreadsheet = client.open_by_key(SPREADSHEET_ID)
-        
-        # Try to open main sheet, otherwise create new one
-        try:
-            sheet = spreadsheet.worksheet("Film Funding")
-        except gspread.WorksheetNotFound:
-            sheet = spreadsheet.add_worksheet(title="Film Funding", rows="1000", cols="13")
-        
-        return sheet
-    except Exception as e:
-        print(f"❌ Error initializing Google Sheets: {e}")
-        return None
+# Récupérer les aides déjà trouvées
+existing_aides = get_existing_entries()
 
-def setup_sheet_headers(sheet):
-    """Configure column headers if they don't exist"""
-    headers = [
-        "Name", "Organization", "Country", "Deadline", "Link", 
-        "Summary", "Email", "Conditions", "Category", "Year", 
-        "Date Added", "Status", "Priority"
+# Agent 1 : Recherche
+research_agent = Agent(
+    role="Chercheur d'aides au documentaire",
+    goal="Identifier et extraire des aides financières pertinentes pour un documentaire en postproduction, abordant l'animisme et les esprits, tourné en Thaïlande et coproduit avec la France.",
+    backstory="Expert en financement culturel pour documentaires internationaux.",
+    verbose=True,
+    llm=llm
+)
+
+# Agent 2 : Nettoyeur
+data_cleaning_agent = Agent(
+    role="Nettoyeur de données",
+    goal="Nettoyer et uniformiser les informations collectées pour créer une base exploitable, en respectant exactement les colonnes demandées.",
+    backstory="Spécialiste de la normalisation de données pour des bases structurées.",
+    verbose=True,
+    llm=llm
+)
+
+# Agent 3 : Vérificateur & Analyste
+analysis_agent = Agent(
+    role="Vérificateur et analyste stratégique",
+    goal="Vérifier la pertinence des liens, s'assurer qu'ils pointent vers des aides spécifiques, et enrichir avec des commentaires stratégiques.",
+    backstory="Consultant expert en montage de dossiers de financement pour films internationaux.",
+    verbose=True,
+    llm=llm
+)
+
+# Génération de la consigne en excluant les aides déjà connues
+exclusion_text = ""
+if existing_aides:
+    # Extraire les noms des aides existantes
+    existing_names = []
+    for aide in existing_aides:
+        # Chercher le champ nom dans différentes variations possibles
+        nom = aide.get('Nom') or aide.get('nom') or aide.get('NAME') or ""
+        if nom:
+            existing_names.append(nom)
+    
+    if existing_names:
+        exclusion_text = "\nIgnore les aides déjà listées avec les noms suivants :\n" + "\n".join(
+            f"- {nom}" for nom in existing_names
+        )
+
+# API Google Search params
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_CX = os.getenv("GOOGLE_CSE_ID")  # Correction du nom de la variable
+
+# Charger dynamiquement les mots-clés depuis Google Sheets (onglet "MotsClés")
+keywords_to_test = get_keywords_from_sheet()
+
+# Si pas de mots-clés dans le sheet, utiliser des mots-clés par défaut
+if not keywords_to_test:
+    print("⚠️ Aucun mot-clé trouvé dans l'onglet 'MotsClés'. Utilisation des mots-clés par défaut.")
+    keywords_to_test = [
+        "aide documentaire postproduction France",
+        "financement documentaire coproduction internationale",
+        "subvention documentaire culturel 2024"
     ]
-    
-    try:
-        # Check if first row already contains headers
-        existing_headers = sheet.row_values(1)
-        if not existing_headers or len(existing_headers) == 0:
-            sheet.append_row(headers)
-            print("✅ Headers added to sheet")
-        else:
-            # Add missing columns
-            for i, header in enumerate(headers):
-                if i >= len(existing_headers) or existing_headers[i] != header:
-                    if i < len(existing_headers):
-                        sheet.update_cell(1, i+1, header)
-                    else:
-                        # Extend header row
-                        current_headers = sheet.row_values(1)
-                        current_headers.extend(headers[len(current_headers):])
-                        sheet.update('1:1', [current_headers])
-                        break
-    except Exception as e:
-        print(f"⚠️ Error setting up headers: {e}")
-        try:
-            sheet.append_row(headers)
-        except Exception as e2:
-            print(f"❌ Failed to add headers: {e2}")
 
-def categorize_funding(name, summary, organization):
-    """Determine funding category"""
-    text_to_analyze = f"{name} {summary} {organization}".lower()
-    
-    if any(word in text_to_analyze for word in ['series', 'tv', 'television']):
-        return "Series"
-    elif any(word in text_to_analyze for word in ['fiction', 'feature', 'long-métrage']):
-        return "Fiction"
-    elif any(word in text_to_analyze for word in ['documentary', 'documentaire', 'doc']):
-        return "Documentary"
-    else:
-        return "General"
+# Limiter le nombre de mots-clés pour les tests (enlever cette ligne pour tout traiter)
+# keywords_to_test = keywords_to_test[:3]
 
-def determine_priority(country, organization):
-    """Determine priority based on country"""
-    text_to_check = f"{country} {organization}".lower()
-    
-    if any(word in text_to_check for word in ['france', 'français', 'cnc', 'french']):
-        return "High - France"
-    elif any(word in text_to_check for word in ['germany', 'german', 'allemagne', 'deutschland', 'ffa']):
-        return "High - Germany"
-    elif any(word in text_to_check for word in ['benin', 'bénin', 'africa', 'afrique']):
-        return "Medium - Africa"
-    elif any(word in text_to_check for word in ['europe', 'eu', 'creative']):
-        return "Medium - Europe"
-    else:
-        return "Normal"
+print(f"\n🔍 Mots-clés à rechercher : {keywords_to_test}\n")
 
-def extract_year(deadline, summary):
-    """Extract year from deadline or summary"""
-    text_to_check = f"{deadline} {summary}"
-    
-    if '2025' in text_to_check:
-        return "2025"
-    elif '2026' in text_to_check:
-        return "2026"
-    elif any(word in text_to_check.lower() for word in ['2025', '2026']):
-        return "2025-2026"
-    else:
-        return "Not specified"
+# API perso pour extraire le contenu des pages
+CONTENT_API_KEY = os.getenv("VERIFYBOT_CONTENT_API_KEY")
 
-def get_existing_entries(sheet):
-    """Get existing entries to avoid duplicates"""
-    try:
-        records = sheet.get_all_records()
-        existing = set()
-        for record in records:
-            name = record.get('Name', '').strip()
-            link = record.get('Link', '').strip()
-            if name and link:
-                existing.add((name.lower(), link))
-        return existing
-    except Exception as e:
-        print(f"⚠️ Error retrieving existing entries: {e}")
-        return set()
-
-def send_to_google_sheets(funding_data):
-    """Send data to Google Sheets"""
-    try:
-        sheet = get_google_sheet()
-        if not sheet:
-            print("❌ Failed to get Google Sheet")
-            return False
-            
-        setup_sheet_headers(sheet)
-        existing_entries = get_existing_entries(sheet)
-        
-        added_count = 0
-        duplicate_count = 0
-        
-        for entry in funding_data:
-            name = entry.get('name', '').strip()
-            link = entry.get('link', '').strip()
-            
-            # Check for duplicates
-            if (name.lower(), link) in existing_entries:
-                duplicate_count += 1
-                print(f"⏭️ Duplicate ignored: {name}")
-                continue
-            
-            # Determine category, year and priority
-            category = categorize_funding(entry.get('name', ''), entry.get('summary', ''), entry.get('organization', ''))
-            year = extract_year(entry.get('deadline', ''), entry.get('summary', ''))
-            priority = determine_priority(entry.get('country', ''), entry.get('organization', ''))
-            
-            # Prepare data row
-            from datetime import datetime
-            row_data = [
-                entry.get('name', ''),
-                entry.get('organization', ''),
-                entry.get('country', ''),
-                entry.get('deadline', ''),
-                entry.get('link', ''),
-                entry.get('summary', ''),
-                entry.get('email', ''),
-                entry.get('conditions', ''),
-                category,
-                year,
-                datetime.now().strftime('%Y-%m-%d %H:%M'),
-                'New',
-                priority
-            ]
-            
-            try:
-                sheet.append_row(row_data)
-                added_count += 1
-                print(f"✅ Added: {name}")
-            except Exception as e:
-                print(f"❌ Error adding {name}: {e}")
-        
-        print(f"\n📊 Google Sheets Summary:")
-        print(f"   - {added_count} new entries added")
-        print(f"   - {duplicate_count} duplicates ignored")
-        
-        return True
-        
-    except Exception as e:
-        print(f"❌ Google Sheets Error: {e}")
-        return False
-
-# --- Google Search API Wrapper ---
-def google_search(query):
-    api_key = os.getenv("GOOGLE_API_KEY")
-    cse_id = os.getenv("GOOGLE_CSE_ID")
-    if not api_key or not cse_id:
-        raise ValueError("❌ GOOGLE_API_KEY or GOOGLE_CSE_ID is not set in the environment.")
+def google_search_urls(query):
+    """Effectue une recherche Google et retourne les URLs"""
     url = "https://www.googleapis.com/customsearch/v1"
     params = {
-        "key": api_key,
-        "cx": cse_id,
+        "key": GOOGLE_API_KEY,
+        "cx": GOOGLE_CX,
         "q": query
     }
-    print("🔐 API Key:", api_key[:10] + "...")  # Only show first 10 chars for security
-    print("🔍 CSE ID:", cse_id[:10] + "...")   # Only show first 10 chars for security
-    print("📡 Query:", query)
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    data = response.json()
-    return [item["link"] for item in data.get("items", [])]
+    try:
+        res = requests.get(url, params=params)
+        results = res.json()
+        links = [item["link"] for item in results.get("items", [])][:5]  # Limiter à 5 résultats
+        print(f"\n🔍 Recherche : {query}")
+        for link in links:
+            print(f"  - {link}")
+        return links
+    except Exception as e:
+        print(f"❌ Erreur recherche Google : {e}")
+        return []
 
-# --- VerifyBot API Wrapper ---
-def extract_page_content(url):
-    CONTENT_API_KEY = os.getenv("VERIFYBOT_CONTENT_API_KEY")
-    if not CONTENT_API_KEY:
-        raise ValueError("❌ VERIFYBOT_CONTENT_API_KEY not set in the environment.")
-    api_url = "https://cockpit.verifybot.app/api-get-content.php"
+def get_page_content(target_url):
+    """Extrait le contenu d'une page web"""
+    api_url = f"https://cockpit.verifybot.app/api-get-content.php"
     params = {
-        "url": url,
+        "url": target_url,
         "key": CONTENT_API_KEY
     }
-    response = requests.get(api_url, params=params)
-    response.raise_for_status()
-    data = response.json()
-    return data.get("content") or data.get("summary") or "No summary available."
-
-# --- Function to parse results ---
-def parse_funding_results(result_text):
-    """Parse result text to extract structured data"""
-    funding_entries = []
     
-    # Try different regex patterns to capture data
-    patterns = [
-        # Main pattern with all fields
-        r"Name\s*:\s*(.*?)\s*Organization\s*:\s*(.*?)\s*Country\s*:\s*(.*?)\s*Deadline\s*:\s*(.*?)\s*Link\s*:\s*(.*?)\s*Summary\s*:\s*(.*?)\s*Email\s*:\s*(.*?)\s*Conditions\s*:\s*(.*?)(?=Name\s*:|$)",
-        # Alternative pattern without some fields
-        r"Name\s*:\s*(.*?)\s*Organization\s*:\s*(.*?)\s*Country\s*:\s*(.*?)\s*Link\s*:\s*(.*?)\s*Summary\s*:\s*(.*?)(?=Name\s*:|$)",
-    ]
+    # Log de l'URL pour debug
+    print(f"  📡 Appel API : {api_url}?url={target_url}&key={'*' * 10 if CONTENT_API_KEY else 'NO_KEY'}")
     
-    for pattern in patterns:
-        matches = re.findall(pattern, result_text, re.DOTALL | re.IGNORECASE)
+    try:
+        response = requests.get(api_url, params=params, timeout=10)
+        data = response.json()
         
-        for match in matches:
-            if len(match) >= 5:  # Minimum: name, organization, country, link, summary
-                entry = {
-                    "name": match[0].strip(),
-                    "organization": match[1].strip(),
-                    "country": match[2].strip(),
-                    "deadline": match[3].strip() if len(match) > 3 else "",
-                    "link": match[4].strip() if len(match) > 4 else match[3].strip(),
-                    "summary": match[5].strip() if len(match) > 5 else match[4].strip(),
-                    "email": match[6].strip() if len(match) > 6 else "",
-                    "conditions": match[7].strip() if len(match) > 7 else ""
-                }
-                
-                # Clean data
-                for key, value in entry.items():
-                    entry[key] = re.sub(r'\*\*', '', value)  # Remove **
-                    entry[key] = re.sub(r'[\(\)]+', '', entry[key])  # Remove excessive parentheses
-                    entry[key] = entry[key].strip()
-                
-                if entry["name"] and entry["organization"]:  # Check essential fields exist
-                    funding_entries.append(entry)
-        
-        if funding_entries:  # If we found entries, stop
-            break
-    
-    # If no pattern works, try simpler approach
-    if not funding_entries:
-        lines = result_text.split('\n')
-        current_entry = {}
-        
-        for line in lines:
-            line = line.strip()
-            if ':' in line:
-                key, value = line.split(':', 1)
-                key = key.strip().lower()
-                value = value.strip()
-                
-                if 'name' in key:
-                    if current_entry and current_entry.get('name'):
-                        funding_entries.append(current_entry)
-                    current_entry = {'name': value}
-                elif 'organization' in key:
-                    current_entry['organization'] = value
-                elif 'country' in key:
-                    current_entry['country'] = value
-                elif 'deadline' in key:
-                    current_entry['deadline'] = value
-                elif 'link' in key:
-                    current_entry['link'] = value
-                elif 'summary' in key:
-                    current_entry['summary'] = value
-                elif 'email' in key:
-                    current_entry['email'] = value
-                elif 'condition' in key:
-                    current_entry['conditions'] = value
-        
-        if current_entry and current_entry.get('name'):
-            funding_entries.append(current_entry)
-    
-    return funding_entries
-
-# --- Agents ---
-search_agent = Agent(
-    role="Film funding specialist France-Germany-Africa",
-    goal="Identify funding opportunities for documentaries, fiction and series, priority France-Germany, for project filmed in Benin about voodoo and politics.",
-    backstory=(
-        "Expert in international co-productions France-Germany-Africa, specialized in documentary "
-        "and fiction projects addressing African cultural and political subjects."
-    ),
-    verbose=True,
-)
-
-data_cleaning_agent = Agent(
-    role="Data cleaner",
-    goal="Clean, standardize and reformulate collected information to create a usable database in a spreadsheet, without superfluous formatting or markdown elements.",
-    backstory="Specialist in data normalization for structured databases.",
-    verbose=True,
-)
-
-# --- Enhanced research function ---
-def funding_research_task():
-    print("🔍 Performing Google searches...")
-    all_opportunities = []
-    
-    for i, query in enumerate(SEARCH_QUERIES, 1):
-        print(f"\n🎯 Search {i}/{len(SEARCH_QUERIES)}: {query}")
-        try:
-            urls = google_search(query)
-            print(f"🔗 Found {len(urls)} URLs")
+        if response.status_code != 200:
+            print(f"  ❌ Erreur HTTP {response.status_code}")
+            return None
             
-            # Process fewer URLs per query to reduce time (5 instead of 10)
-            for j, url in enumerate(urls[:5]):
-                print(f"📄 Reading {j+1}/5: {url}")
-                try:
-                    summary = extract_page_content(url)
-                    all_opportunities.append(f"---\nQuery: {query}\nURL: {url}\n{summary}")
-                except Exception as e:
-                    print(f"⚠️ Extraction error {url}: {e}")
-                    continue
+        content = data.get("content", "")
+        if content:
+            print(f"  ✅ Contenu extrait : {len(content)} caractères")
+        else:
+            print(f"  ⚠️ Réponse vide ou erreur : {data.get('error', 'Aucun contenu')}")
+            
+        return content if content else None
+    except Exception as e:
+        print(f"  ❌ Exception : {e}")
+        return None
+
+# Collecter le contenu des pages
+documents_text = ""
+total_urls = 0
+
+for keyword in keywords_to_test:
+    urls = google_search_urls(keyword)
+    for url in urls:
+        try:
+            content = get_page_content(url)
+            if content:
+                documents_text += f"\n\n---\nContenu extrait de : {url}\n{content[:5000]}\n"  # Limiter la taille
+                total_urls += 1
+            else:
+                print(f"⚠️ Aucun contenu extrait pour : {url}")
         except Exception as e:
-            print(f"❌ Search error '{query}': {e}")
-            continue
+            print(f"Erreur sur {url}: {e}")
+
+print(f"\n📚 Total : {total_urls} pages extraites\n")
+
+# Si aucun contenu trouvé, arrêter
+if not documents_text:
+    print("❌ Aucun contenu trouvé. Vérifiez vos clés API.")
+    exit(1)
+
+# Tâche de recherche avec prompt dynamique
+funding_task = Task(
+    description=f"""{prompt_text}
     
-    print(f"\n✅ Total: {len(all_opportunities)} contents extracted")
-    return "\n\n".join(all_opportunities)
-
-# --- Tasks ---
-search_task = Task(
-    description=f"""Analyze collected web content and extract funding opportunities for:
-
-TARGET PROJECT:
-- Documentary/Fiction/Series about voodoo and politics in Benin
-- France-Germany-Benin co-production
-- Years 2025-2026
-
-SEARCH PRIORITIES:
-1. French funding (CNC, regional, etc.)
-2. German funding (FFA, Länder, etc.) 
-3. European funding (Creative Europe, etc.)
-4. International Africa-Europe funding
-
-For each funding opportunity, provide these EXACT fields:
-- Name: Official name of the funding
-- Organization: Organization offering the funding
-- Country: Country or region of the organization
-- Deadline: Application deadline (2025/2026)
-- Link: Direct URL to the funding page
-- Summary: Short description (2-3 sentences)
-- Email: Contact email if available
-- Conditions: Key eligibility criteria
-
-Content to analyze:
-{funding_research_task()}""",
-    expected_output="Structured list of funding opportunities with fields: Name, Organization, Country, Deadline, Link, Summary, Email, Conditions. Priority to France-Germany funding 2025-2026.",
-    agent=search_agent,
+    IMPORTANT : Pour chaque aide trouvée, extrais TOUTES les informations demandées.
+    Si une information n'est pas disponible, indique "Non spécifié" mais inclus quand même le champ.
+    
+    {exclusion_text}
+    
+    Contenu à analyser :
+    {documents_text[:50000]}""",  # Limiter la taille pour GPT
+    expected_output=f"Une liste structurée d'aides avec EXACTEMENT ces champs : {', '.join(expected_headers)}",
+    agent=research_agent
 )
 
-# Cleaning task
+# Tâche de nettoyage
 data_cleaning_task = Task(
-    description="""Clean and structure data for documentary/fiction project in Benin:
-
-CLEANING:
-- Remove unnecessary characters (**...**, superfluous parentheses)
-- Fix email and link formats
-- Reformulate summaries that are too long (max 2-3 sentences)
-- Identify if funding concerns: Documentary/Fiction/Series
-
-PRIORITIZATION:
-- Mark France and Germany funding as priority
-- Identify 2025 and 2026 funding
-- Flag international co-production specific funding
-
-FINAL STRUCTURE:
-Required fields: Name, Organization, Country, Deadline, Link, Summary, Email, Conditions
-Result ready for spreadsheet with automatic classification.""",
-    expected_output="Clean and classified version (Documentary/Fiction/Series) with France-Germany priorities identified",
+    description=f"""Prends les résultats et nettoie-les :
+    - Supprime tous les caractères de formatage markdown
+    - Assure-toi que chaque aide a TOUS les champs suivants : {', '.join(expected_headers)}
+    - Standardise les formats (dates, emails, liens)
+    - Garde un format cohérent pour chaque entrée""",
+    expected_output=f"Liste propre avec ces champs exacts : {', '.join(expected_headers)}",
     agent=data_cleaning_agent
 )
 
-# --- Crew ---
-crew = Crew(
-    agents=[search_agent, data_cleaning_agent],
-    tasks=[search_task, data_cleaning_task],
-    verbose=True,
+# Tâche d'analyse
+analysis_task = Task(
+    description=f"""Vérifie et enrichis chaque aide :
+    - Vérifie que les liens sont pertinents (pas de pages d'accueil génériques)
+    - Ajoute des commentaires stratégiques sur l'adéquation avec le projet
+    - Complète les informations manquantes si possible
+    - Structure finale avec TOUS ces champs : {', '.join(expected_headers)}""",
+    expected_output=f"Version finale enrichie avec tous les champs : {', '.join(expected_headers)}",
+    agent=analysis_agent
 )
 
-# --- Run ---
-print("🚀 Starting funding research and cleaning tasks...")
+# Création de la crew
+crew = Crew(
+    agents=[research_agent, data_cleaning_agent, analysis_agent],
+    tasks=[funding_task, data_cleaning_task, analysis_task],
+    verbose=True
+)
+
+print("\n🚀 Lancement de la recherche d'aides...\n")
+
+# Exécution
 try:
     result = crew.kickoff()
+    result_text = str(result)
     
-    # Extract final result
-    if hasattr(result, 'raw') and isinstance(result.raw, str):
-        final_content = result.raw
+    print("\n📄 Résultat brut (aperçu) :")
+    print(result_text[:1000] + "..." if len(result_text) > 1000 else result_text)
+    
+    # Parser le résultat avec la nouvelle fonction dynamique
+    entries = parse_crew_output(result_text, expected_headers)
+    
+    print(f"\n📊 {len(entries)} aide(s) extraite(s)")
+    
+    # Si pas d'entrées, essayer un parsing alternatif
+    if not entries:
+        print("\n⚠️ Parsing standard échoué. Tentative de parsing alternatif...")
+        
+        # Méthode alternative : chercher des blocs de texte structurés
+        import re
+        
+        # Chercher toutes les URLs dans le texte
+        urls = re.findall(r'https?://[^\s]+', result_text)
+        print(f"URLs trouvées dans le résultat : {len(urls)}")
+        
+        # Créer des entrées basiques avec ce qu'on trouve
+        for i, url in enumerate(urls[:10]):  # Limiter à 10
+            # Chercher du contexte autour de l'URL
+            url_context = ""
+            url_pos = result_text.find(url)
+            if url_pos > 0:
+                # Prendre 200 caractères avant et après l'URL
+                start = max(0, url_pos - 200)
+                end = min(len(result_text), url_pos + len(url) + 200)
+                url_context = result_text[start:end]
+            
+            # Essayer d'extraire un nom
+            nom_patterns = [
+                r'(?:Nom|Aide|Programme|Fonds)\s*:\s*([^\n]+)',
+                r'(?:^|\n)([A-Z][^:\n]{10,50})(?=\n)',
+                r'(?:aide|subvention|financement)\s+([^\n]+)'
+            ]
+            
+            nom = f"Aide {i+1}"  # Nom par défaut
+            for pattern in nom_patterns:
+                match = re.search(pattern, url_context, re.IGNORECASE)
+                if match:
+                    nom = match.group(1).strip()
+                    break
+            
+            # Créer une entrée basique
+            entry = {
+                "Nom": nom,
+                "Lien": url.strip(),
+                "Résumé": url_context.replace('\n', ' ').strip()[:200],
+                "Statut": "À vérifier"
+            }
+            
+            # Essayer d'extraire d'autres infos
+            if 'cnc' in url.lower():
+                entry["Organisme"] = "CNC"
+                entry["Pays"] = "France"
+            elif 'scam' in url.lower():
+                entry["Organisme"] = "SCAM"
+                entry["Pays"] = "France"
+            elif 'iledefrance' in url.lower():
+                entry["Organisme"] = "Région Île-de-France"
+                entry["Pays"] = "France"
+            
+            entries.append(entry)
+        
+        print(f"\n📊 {len(entries)} aide(s) créée(s) par parsing alternatif")
+    
+    if entries:
+        print("\n🔍 Aperçu des entrées extraites :")
+        for i, entry in enumerate(entries[:3]):
+            print(f"\n--- Entrée {i+1} ---")
+            for key, value in entry.items():
+                print(f"  {key}: {value[:100] if value and len(value) > 100 else value}")
+        
+        # Envoi vers Google Sheets
+        print("\n📤 Envoi vers Google Sheets...")
+        send_to_google_sheet(entries)
     else:
-        final_content = str(result)
+        print("\n❌ Aucune aide trouvée même avec le parsing alternatif")
+        print("\nDébut du résultat brut pour analyse :")
+        print(result_text[:1000])
+    else:
+        print("\n⚠️ Aucune aide trouvée dans le résultat. Vérifiez le format de sortie des agents.")
+        
+        # Mode debug : essayer un parsing alternatif
+        print("\n🔧 Tentative de parsing alternatif...")
+        
+        # Rechercher des patterns simples
+        simple_pattern = r"Nom\s*:\s*(.+?)(?:\n|$)"
+        matches = re.findall(simple_pattern, result_text, re.MULTILINE)
+        if matches:
+            print(f"Trouvé {len(matches)} nom(s) d'aide : {matches[:3]}...")
         
 except Exception as e:
-    print("❌ Error during crew execution:", str(e))
-    final_content = "No results due to error."
+    print(f"\n❌ Erreur lors de l'exécution : {e}")
+    import traceback
+    traceback.print_exc()
 
-# --- Parse and send to Google Sheets ---
-print("📊 Parsing results for Google Sheets...")
-funding_data = parse_funding_results(final_content)
-
-if funding_data:
-    print(f"📋 Found {len(funding_data)} funding opportunities")
-    
-    # Send to Google Sheets
-    sheets_success = send_to_google_sheets(funding_data)
-    
-    if sheets_success:
-        print("✅ Data successfully sent to Google Sheets!")
-    else:
-        print("❌ Failed to send data to Google Sheets")
-else:
-    print("⚠️ No structured funding data found to send to Google Sheets")
-
-# --- Send email ---
-email_subject = "🎬 Film Funding Opportunities - Cleaned Results"
-to_email = os.getenv("EMAIL_RECIPIENT")
-
-if to_email:
-    print("📤 Sending email...")
-    try:
-        email_result = smtp_email_sender.invoke({
-            "subject": email_subject,
-            "content": final_content,
-            "to_email": to_email
-        })
-        print("📧 Email result:", email_result)
-    except Exception as e:
-        print("❌ Failed to send email:", str(e))
-else:
-    print("⚠️ No email recipient configured, skipping email...")
-
-print("\n✅ Script completed!")
-
-# Optional: display result in console
-print("\n" + "="*50)
-print("CLEANED RESULTS:")
-print("="*50)
-print(final_content)
-
-if funding_data:
-    print("\n" + "="*50)
-    print("STRUCTURED DATA FOR GOOGLE SHEETS:")
-    print("="*50)
-    for i, entry in enumerate(funding_data, 1):
-        print(f"\n--- ENTRY {i} ---")
-        for key, value in entry.items():
-            print(f"{key.capitalize()}: {value}")
+print("\n✅ Script terminé")
