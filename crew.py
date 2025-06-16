@@ -3,10 +3,24 @@ from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 import os
 import requests
-from sheets_utils import send_to_google_sheet, get_existing_entries, get_keywords_from_sheet, generate_crew_prompt, parse_crew_output
+import re
+from sheets_utils import (
+    send_to_google_sheet, 
+    get_existing_entries, 
+    get_keywords_from_sheet, 
+    generate_crew_prompt, 
+    parse_crew_output,
+    test_google_sheets_connection
+)
 
 # Charger les variables d'environnement (.env)
 load_dotenv()
+
+# Test de connexion Google Sheets au démarrage
+print("🔧 Vérification de la connexion Google Sheets...")
+if not test_google_sheets_connection():
+    print("❌ Impossible de se connecter à Google Sheets. Vérifiez votre fichier credentials.json")
+    exit(1)
 
 # Initialiser le modèle LLM
 llm = ChatOpenAI(model="gpt-4-turbo")
@@ -76,9 +90,6 @@ if not keywords_to_test:
         "financement documentaire coproduction internationale",
         "subvention documentaire culturel 2024"
     ]
-
-# Limiter le nombre de mots-clés pour les tests (enlever cette ligne pour tout traiter)
-# keywords_to_test = keywords_to_test[:3]
 
 print(f"\n🔍 Mots-clés à rechercher : {keywords_to_test}\n")
 
@@ -176,12 +187,17 @@ funding_task = Task(
 
 # Tâche de nettoyage
 data_cleaning_task = Task(
-    description=f"""Prends les résultats et nettoie-les :
-    - Supprime tous les caractères de formatage markdown
+    description=f"""Prends les résultats et nettoie-les pour un tableur :
+    - Supprime TOUS les caractères de formatage : *, **, _, __, #, ##, ###, etc.
+    - Supprime les retours à la ligne multiples et remplace par des espaces
+    - Supprime les tabulations et caractères spéciaux
+    - Convertis tout en texte brut, sans formatage markdown ou HTML
     - Assure-toi que chaque aide a TOUS les champs suivants : {', '.join(expected_headers)}
-    - Standardise les formats (dates, emails, liens)
-    - Garde un format cohérent pour chaque entrée""",
-    expected_output=f"Liste propre avec ces champs exacts : {', '.join(expected_headers)}",
+    - Standardise les formats (dates en DD/MM/YYYY, emails sans espaces, liens complets avec https://)
+    - Garde un format cohérent pour chaque entrée
+    - Maximum 500 caractères par champ pour éviter les débordements
+    - Remplace les caractères problématiques comme les guillemets par des apostrophes simples""",
+    expected_output=f"Liste propre en texte brut avec ces champs exacts : {', '.join(expected_headers)}",
     agent=data_cleaning_agent
 )
 
@@ -223,8 +239,6 @@ try:
         print("\n⚠️ Parsing standard échoué. Tentative de parsing alternatif...")
         
         # Méthode alternative : chercher des blocs de texte structurés
-        import re
-        
         # Chercher toutes les URLs dans le texte
         urls = re.findall(r'https?://[^\s]+', result_text)
         print(f"URLs trouvées dans le résultat : {len(urls)}")
@@ -255,23 +269,34 @@ try:
                     break
             
             # Créer une entrée basique
-            entry = {
-                "Nom": nom,
-                "Lien": url.strip(),
-                "Résumé": url_context.replace('\n', ' ').strip()[:200],
-                "Statut": "À vérifier"
-            }
+            entry = {}
             
-            # Essayer d'extraire d'autres infos
-            if 'cnc' in url.lower():
-                entry["Organisme"] = "CNC"
-                entry["Pays"] = "France"
-            elif 'scam' in url.lower():
-                entry["Organisme"] = "SCAM"
-                entry["Pays"] = "France"
-            elif 'iledefrance' in url.lower():
-                entry["Organisme"] = "Région Île-de-France"
-                entry["Pays"] = "France"
+            # Remplir avec les colonnes attendues
+            for header in expected_headers:
+                if 'nom' in header.lower():
+                    entry[header] = nom
+                elif 'lien' in header.lower() or 'url' in header.lower():
+                    entry[header] = url.strip()
+                elif 'résumé' in header.lower() or 'resume' in header.lower():
+                    entry[header] = url_context.replace('\n', ' ').strip()[:200]
+                elif 'statut' in header.lower():
+                    entry[header] = "À vérifier"
+                elif 'organisme' in header.lower():
+                    if 'cnc' in url.lower():
+                        entry[header] = "CNC"
+                    elif 'scam' in url.lower():
+                        entry[header] = "SCAM"
+                    elif 'iledefrance' in url.lower():
+                        entry[header] = "Région Île-de-France"
+                    else:
+                        entry[header] = ""
+                elif 'pays' in header.lower():
+                    if any(keyword in url.lower() for keyword in ['cnc', 'scam', 'iledefrance', 'france']):
+                        entry[header] = "France"
+                    else:
+                        entry[header] = ""
+                else:
+                    entry[header] = ""
             
             entries.append(entry)
         
@@ -282,7 +307,7 @@ try:
         for i, entry in enumerate(entries[:3]):
             print(f"\n--- Entrée {i+1} ---")
             for key, value in entry.items():
-                print(f"  {key}: {value[:100] if value and len(value) > 100 else value}")
+                print(f"  {key}: {value[:100] if value and len(str(value)) > 100 else value}")
         
         # Envoi vers Google Sheets
         print("\n📤 Envoi vers Google Sheets...")
@@ -291,21 +316,39 @@ try:
         print("\n❌ Aucune aide trouvée même avec le parsing alternatif")
         print("\nDébut du résultat brut pour analyse :")
         print(result_text[:1000])
-    else:
-        print("\n⚠️ Aucune aide trouvée dans le résultat. Vérifiez le format de sortie des agents.")
-        
-        # Mode debug : essayer un parsing alternatif
-        print("\n🔧 Tentative de parsing alternatif...")
-        
-        # Rechercher des patterns simples
-        simple_pattern = r"Nom\s*:\s*(.+?)(?:\n|$)"
-        matches = re.findall(simple_pattern, result_text, re.MULTILINE)
-        if matches:
-            print(f"Trouvé {len(matches)} nom(s) d'aide : {matches[:3]}...")
         
 except Exception as e:
     print(f"\n❌ Erreur lors de l'exécution : {e}")
     import traceback
     traceback.print_exc()
+
+#print("\n✅ Script terminé")
+
+# Remplacer le dernier "print("\n✅ Script terminé")" par :
+
+# Email de notification
+try:
+    from tools.smtp_email_tool import smtp_email_sender
+
+    # Préparer le message
+    if entries:
+        subject = f"✅ Funding Script - {len(entries)} nouvelles aides"
+        message = f"Script terminé avec succès. {len(entries)} nouvelles aides ajoutées au Google Sheet."
+    else:
+        subject = "⚠️ Funding Script - Aucune nouvelle aide"
+        message = "Script terminé mais aucune nouvelle aide trouvée."
+
+    # Ajouter timestamp
+    message += f"\nExécuté le {datetime.now().strftime('%d/%m/%Y à %H:%M')}"
+
+    # Envoyer
+    email_result = smtp_email_sender.invoke({
+        "subject": subject,
+        "content": message
+    })
+    print(f"\n📧 Email envoyé : {email_result}")
+
+except Exception as e:
+    print(f"\n⚠️ Erreur envoi email : {e}")
 
 print("\n✅ Script terminé")
