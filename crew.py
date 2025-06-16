@@ -339,7 +339,7 @@ try:
         message = "Script terminé mais aucune nouvelle aide trouvée."
 
     # Ajouter timestamp
-    message += f"\nExécuté le {datetime.now().strftime('%d/%m/%Y à %H:%M')}"
+    # message += f"\nExécuté le {datetime.now().strftime('%d/%m/%Y à %H:%M')}"
 
     # Envoyer
     email_result = smtp_email_sender.invoke({
